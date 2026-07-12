@@ -37,7 +37,37 @@ export interface RenderedDomResult {
 }
 
 /**
- * Main entry point with retry logic
+ * Determine whether rendered DOM extraction should be attempted.
+ * Gates on lazy-load patterns, Elementor patterns, and SPA root selectors.
+ * @param html Raw HTML string to check for rendering patterns.
+ * @returns True if iframe rendering should be attempted.
+ */
+export function shouldRenderDom(html: string): boolean {
+  if (!html || html.trim().length === 0) return false;
+
+  if (hasLazyLoadPatterns(html)) return true;
+  if (hasElementorPatterns(html)) return true;
+
+  // SPA root selectors
+  const spaPatterns = [
+    'id="root"', 'id="app"', 'id="__next"', 'id="__nuxt"',
+    "data-reactroot", "data-react-root", "data-v-app", "ng-version",
+  ];
+  const lower = html.toLowerCase();
+  for (const pattern of spaPatterns) {
+    if (lower.includes(pattern.toLowerCase())) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Main entry point with retry logic.
+ * Renders HTML in a hidden sandboxed iframe, waits for JS execution,
+ * scrolls to trigger lazy loading, and serializes the fully rendered DOM.
+ * @param html Raw HTML string to render.
+ * @param url Source URL for base tag injection (relative URL resolution).
+ * @returns RenderedDomResult with rendered HTML and diagnostics.
  */
 export async function renderDomInIframe(html: string, url: string): Promise<RenderedDomResult> {
   if (!html || html.trim().length === 0) {
@@ -45,7 +75,7 @@ export async function renderDomInIframe(html: string, url: string): Promise<Rend
   }
 
   let attempt = 0;
-  let bestResult = null;
+  let bestResult: RenderedDomResult | null = null;
 
   while (attempt <= MAX_RETRIES) {
     const result = await performRenderAttempt(html, url, attempt);
@@ -59,11 +89,11 @@ export async function renderDomInIframe(html: string, url: string): Promise<Rend
     if (attempt <= MAX_RETRIES) await delay(1200);
   }
 
-  return bestResult;
+  return bestResult ?? createFailureResult("All render attempts failed", ["rendering_failed"]);
 }
 
-/** Single render attempt */
-async function performRenderAttempt(html: string, url: string, attempt: number) {
+/** Single render attempt. */
+async function performRenderAttempt(html: string, url: string, attempt: number): Promise<RenderedDomResult> {
   const contaminationFlags: string[] = [];
   const hasElementor = hasElementorPatterns(html);
   const hasLazy = hasLazyLoadPatterns(html);
@@ -84,7 +114,7 @@ async function performRenderAttempt(html: string, url: string, attempt: number) 
     }
 
     // Core rendering waits
-    await waitForInitialRender(win, doc);
+    await waitForInitialRender(doc);
     await waitForSpaReadiness(doc);
     if (hasElementor) await waitForElementor(win);
 
@@ -136,7 +166,8 @@ async function performRenderAttempt(html: string, url: string, attempt: number) 
     };
 
   } catch (err) {
-    return createFailureResult(err.message, ["rendering_failed"]);
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    return createFailureResult(errorMsg, ["rendering_failed"]);
   } finally {
     iframe.remove();
   }
@@ -144,18 +175,18 @@ async function performRenderAttempt(html: string, url: string, attempt: number) 
 
 // ==================== Core Helpers ====================
 
-function createHiddenIframe() {
+function createHiddenIframe(): HTMLIFrameElement {
   const iframe = document.createElement("iframe");
   iframe.style.cssText = "position:absolute; left:-9999px; top:-9999px; width:1280px; height:900px; visibility:hidden; border:none;";
   iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
   return iframe;
 }
 
-function injectBaseTag(html, url) {
+function injectBaseTag(html: string, url: string): string {
   try {
     const base = new URL(url).origin;
     if (/<\/head>/i.test(html)) {
-      return html.replace(/<head[^>]*>/i, match => `${match}<base href="${base}">`);
+      return html.replace(/<head[^>]*>/i, (match: string) => `${match}<base href="${base}">`);
     }
     return `<head><base href="${base}"></head>` + html;
   } catch {
@@ -163,21 +194,21 @@ function injectBaseTag(html, url) {
   }
 }
 
-async function waitForIframeLoad(iframe) {
+function waitForIframeLoad(iframe: HTMLIFrameElement): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Iframe timeout")), RENDER_TIMEOUT_MS);
     iframe.onload = () => { clearTimeout(timer); resolve(); };
   });
 }
 
-async function waitForInitialRender(win, doc) {
+async function waitForInitialRender(doc: Document): Promise<void> {
   if (doc.readyState === "loading") {
-    await new Promise(r => doc.addEventListener("DOMContentLoaded", r, {once: true}));
+    await new Promise<void>(r => doc.addEventListener("DOMContentLoaded", () => r(), { once: true }));
   }
   await delay(INITIAL_RENDER_WAIT_MS);
 }
 
-async function waitForSpaReadiness(doc) {
+async function waitForSpaReadiness(doc: Document): Promise<void> {
   const selectors = [
     '[data-reactroot]', '[data-react-root]', '#__next', '[data-v-app]',
     '[ng-version]', '#root', '#app'
@@ -191,10 +222,11 @@ async function waitForSpaReadiness(doc) {
   }
 }
 
-async function waitForElementor(win) {
+async function waitForElementor(win: Window): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < ELEMENTOR_WAIT_MS) {
-    if (win.elementorFrontend?.modules) {
+    const w = win as unknown as { elementorFrontend?: { modules?: unknown } };
+    if (w.elementorFrontend?.modules) {
       await delay(1200);
       return;
     }
@@ -202,8 +234,8 @@ async function waitForElementor(win) {
   }
 }
 
-async function observeDomMutations(doc) {
-  return new Promise(resolve => {
+function observeDomMutations(doc: Document): Promise<number> {
+  return new Promise<number>(resolve => {
     let count = 0;
     const obs = new MutationObserver(() => { count += 1; });
     obs.observe(doc.documentElement, { childList: true, subtree: true });
@@ -214,7 +246,11 @@ async function observeDomMutations(doc) {
   });
 }
 
-async function triggerLazyLoadScrollingWithGrowth(doc, win, initialTextLen) {
+async function triggerLazyLoadScrollingWithGrowth(
+  doc: Document,
+  win: Window,
+  initialTextLen: number,
+): Promise<{ steps: number; growth: number }> {
   let steps = 0;
   let lastHeight = doc.documentElement.scrollHeight;
 
@@ -236,16 +272,16 @@ async function triggerLazyLoadScrollingWithGrowth(doc, win, initialTextLen) {
   return { steps, growth: finalText.length - initialTextLen };
 }
 
-function serializeRenderedDom(doc) {
+function serializeRenderedDom(doc: Document): string {
   const doctype = doc.doctype ? `<!DOCTYPE ${doc.doctype.name}>` : "<!DOCTYPE html>";
   return doctype + "\n" + doc.documentElement.outerHTML;
 }
 
-function isPoorlyRendered(result) {
-  return result.diagnostics.nodeCount < 250 || result.diagnostics.textLength < 300;
+function isGoodRender(result: RenderedDomResult): boolean {
+  return result.diagnostics.nodeCount >= 250 && result.diagnostics.textLength >= 300;
 }
 
-function createFailureResult(errorMsg, flags) {
+function createFailureResult(errorMsg: string, flags: string[]): RenderedDomResult {
   return {
     html: "",
     rendered: false,
@@ -255,10 +291,18 @@ function createFailureResult(errorMsg, flags) {
     contentGrowth: 0,
     error: errorMsg,
     contaminationFlags: flags,
-    diagnostics: { nodeCount: 0, textLength: 0, scrollHeight: 0, mutationCount: 0, hydrationShell: false, scriptOnlyDom: false, retries: 0 }
+    diagnostics: {
+      nodeCount: 0,
+      textLength: 0,
+      scrollHeight: 0,
+      mutationCount: 0,
+      hydrationShell: false,
+      scriptOnlyDom: false,
+      retries: 0,
+    },
   };
 }
 
-function delay(ms) {
+function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
