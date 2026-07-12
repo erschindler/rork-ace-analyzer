@@ -1,20 +1,27 @@
 /**
- * Elementor Detector — Phase 2
+ * Elementor Detector — Phase 2 (Updated)
  *
- * Detects and classifies Elementor DOM structures in WordPress pages.
- * Elementor uses a complex nested DOM structure with div-based sections,
- * inner sections, containers, columns, and widgets that replace native
- * HTML5 semantic elements.
+ * Detects and classifies modern Elementor DOM structures in WordPress pages.
+ * Supports:
+ * - Legacy Section/Column layout
+ * - Modern Flexbox Container layout (e-con*)
+ * - Nested inner sections
+ * - Widgets and widget containers
+ * - Theme builder / Pro widgets
+ * - Basic lazy-load / hydration readiness signals
  *
- * Elementor DOM hierarchy:
+ * Elementor DOM hierarchy (legacy):
  *   .elementor-section (top-level section → treat as <section>)
  *     .elementor-container (layout container)
  *       .elementor-column (column → treat as <div role="region">)
  *         .elementor-widget-* (widget → content block)
  *         .elementor-inner-section (nested section → treat as nested <section>)
- *           .elementor-container
- *             .elementor-column
- *               .elementor-widget-*
+ *
+ * Elementor DOM hierarchy (modern Flexbox):
+ *   .e-con (Elementor Container)
+ *     .e-con-inner
+ *       .elementor-element (generic element wrapper)
+ *         .elementor-widget-* (widget → content block)
  *
  * This module provides detection functions used by:
  * - semanticStructureExtractor: to identify Elementor sections/widgets
@@ -22,16 +29,26 @@
  * - renderedDomExtractor: to wait for Elementor's rendering lifecycle
  */
 
-/** Class patterns that identify Elementor structural elements. */
+/** Class patterns that identify Elementor structural elements (legacy + modern). */
 const ELEMENTOR_SECTION_PATTERNS = [
+  // Legacy section patterns
   "elementor-section",
   "elementor-top-section",
   "elementor-inner-section",
+  "elementor-section-wrap",
+  // Modern container-based section wrappers
+  "e-con", // Flexbox container
+  "e-con-inner",
+  "e-con-boxed",
+  "e-con-full",
 ];
 
 const ELEMENTOR_CONTAINER_PATTERNS = [
   "elementor-container",
   "elementor-widget-container",
+  "elementor-element", // generic Elementor element wrapper
+  "elementor-element-populated",
+  "elementor-widget-wrap",
 ];
 
 const ELEMENTOR_COLUMN_PATTERNS = [
@@ -39,6 +56,7 @@ const ELEMENTOR_COLUMN_PATTERNS = [
   "elementor-col-",
 ];
 
+/** Widget patterns including common core + theme/pro widgets. */
 const ELEMENTOR_WIDGET_PATTERNS = [
   "elementor-widget",
   "elementor-widget-heading",
@@ -72,16 +90,27 @@ const ELEMENTOR_WIDGET_PATTERNS = [
   "elementor-widget-shortcode",
   "elementor-widget-sidebar",
   "elementor-widget-woocommerce",
+  // Theme builder / Pro widgets
   "elementor-widget-theme-site-logo",
   "elementor-widget-theme-site-title",
+  "elementor-widget-theme-site-tagline",
+  "elementor-widget-theme-site-description",
+  "elementor-widget-theme-site-navigation",
+  "elementor-widget-theme-site-search",
+  "elementor-widget-theme-site-cart",
+  "elementor-widget-theme-site-menu",
   "elementor-widget-theme-post-title",
   "elementor-widget-theme-post-content",
   "elementor-widget-theme-post-excerpt",
   "elementor-widget-theme-post-featured-image",
   "elementor-widget-theme-archive-title",
+  "elementor-widget-theme-archive-description",
   "elementor-widget-archive-posts",
   "elementor-widget-posts",
   "elementor-widget-loop-grid",
+  "elementor-widget-loop-carousel",
+  "elementor-widget-loop-item",
+  "elementor-widget-loop-template",
 ];
 
 /** Data attributes that indicate Elementor elements. */
@@ -90,33 +119,68 @@ const ELEMENTOR_DATA_ATTRIBUTES = [
   "data-elementor-id",
   "data-elementor-settings",
   "data-elementor-post-type",
+  "data-elementor-device-mode",
+];
+
+/** Script/inline markers that often appear in Elementor pages. */
+const ELEMENTOR_SCRIPT_MARKERS = [
+  "elementor/frontend",
+  "elementorFrontend",
+  "elementor-webpack",
+  "elementor-pro",
 ];
 
 /**
  * Check if a Document contains Elementor-generated content.
+ * This is a high-level detector that works for both legacy and modern layouts.
  * @param doc Parsed Document or Element.
  * @returns True if Elementor content is detected.
  */
 export function isElementorPage(doc: Document | Element): boolean {
-  // Check for Elementor class patterns
-  for (const pattern of ELEMENTOR_SECTION_PATTERNS) {
-    if (doc.querySelector(`[class*="${pattern}"]`)) return true;
-  }
-  for (const pattern of ELEMENTOR_WIDGET_PATTERNS) {
-    if (doc.querySelector(`[class*="${pattern}"]`)) return true;
+  // 1. Class-based detection (sections, containers, widgets)
+  const classPatterns = [
+    ...ELEMENTOR_SECTION_PATTERNS,
+    ...ELEMENTOR_CONTAINER_PATTERNS,
+    ...ELEMENTOR_WIDGET_PATTERNS,
+    ...ELEMENTOR_COLUMN_PATTERNS,
+  ];
+
+  for (const pattern of classPatterns) {
+    if (doc.querySelector(`[class*="${pattern}"]`)) {
+      return true;
+    }
   }
 
-  // Check for Elementor data attributes
+  // 2. Data-attribute detection
   for (const attr of ELEMENTOR_DATA_ATTRIBUTES) {
-    if (doc.querySelector(`[${attr}]`)) return true;
+    if (doc.querySelector(`[${attr}]`)) {
+      return true;
+    }
   }
 
-  // Check for Elementor inline styles (elementor injects <style> with elementor- IDs)
+  // 3. Inline style detection (Elementor often injects style blocks with .elementor- selectors)
   const styles = doc.querySelectorAll("style");
   for (const style of styles) {
     const text = style.textContent ?? "";
     if (text.includes("elementor-") && text.includes(".elementor-")) {
       return true;
+    }
+  }
+
+  // 4. Script markers (Elementor frontend / webpack / pro)
+  const scripts = doc.querySelectorAll("script");
+  for (const script of scripts) {
+    const text = script.textContent ?? "";
+    for (const marker of ELEMENTOR_SCRIPT_MARKERS) {
+      if (text.includes(marker)) {
+        return true;
+      }
+    }
+    const src = script.getAttribute("src") ?? "";
+    for (const marker of ELEMENTOR_SCRIPT_MARKERS) {
+      if (src.includes(marker)) {
+        return true;
+      }
     }
   }
 
@@ -132,20 +196,24 @@ export function isElementorPage(doc: Document | Element): boolean {
 export function hasElementorPatterns(html: string): boolean {
   if (!html) return false;
   const lowerHtml = html.toLowerCase();
+
   return (
     lowerHtml.includes("elementor-section") ||
     lowerHtml.includes("elementor-widget") ||
     lowerHtml.includes("elementor-column") ||
     lowerHtml.includes("elementor-container") ||
+    lowerHtml.includes("elementor-element") ||
+    lowerHtml.includes("e-con") ||
     lowerHtml.includes("data-elementor-type") ||
     lowerHtml.includes("data-elementor-id") ||
-    lowerHtml.includes("elementor/frontend")
+    lowerHtml.includes("elementor/frontend") ||
+    lowerHtml.includes("elementorfrontend")
   );
 }
 
 /**
- * Find all Elementor section elements in a Document.
- * Elementor sections are the top-level structural containers.
+ * Find all Elementor section-like elements in a Document.
+ * Includes legacy .elementor-section and modern .e-con containers.
  * @param doc Parsed Document.
  * @returns Array of Elementor section elements.
  */
@@ -166,7 +234,14 @@ export function detectElementorSections(doc: Document): Element[] {
  */
 export function detectElementorInnerSections(doc: Document): Element[] {
   const innerSections = new Set<Element>();
-  doc.querySelectorAll("[class*='elementor-inner-section']").forEach((el) => innerSections.add(el));
+
+  doc.querySelectorAll("[class*='elementor-inner-section']").forEach((el) =>
+    innerSections.add(el),
+  );
+
+  // Modern nested containers can also be represented by nested .e-con elements
+  doc.querySelectorAll(".e-con .e-con-inner").forEach((el) => innerSections.add(el));
+
   return Array.from(innerSections);
 }
 
@@ -182,6 +257,9 @@ export function detectElementorWidgets(doc: Document): Element[] {
   for (const pattern of ELEMENTOR_WIDGET_PATTERNS) {
     doc.querySelectorAll(`[class*="${pattern}"]`).forEach((el) => widgets.add(el));
   }
+
+  // Generic widget wrapper
+  doc.querySelectorAll("[class*='elementor-widget']").forEach((el) => widgets.add(el));
 
   return Array.from(widgets);
 }
@@ -203,7 +281,7 @@ export function detectElementorColumns(doc: Document): Element[] {
 
 /**
  * Extract all text content from Elementor widgets.
- * Includes heading text, paragraph text, button text, and alt text.
+ * Includes heading text, paragraph text, button text, alt text, aria-label, and title.
  * @param doc Parsed Document.
  * @returns Concatenated text from all Elementor widgets.
  */
@@ -213,7 +291,10 @@ export function extractElementorText(doc: Document): string {
 
   for (const widget of widgets) {
     // Get the widget container (where the actual content is)
-    const container = widget.querySelector(".elementor-widget-container");
+    const container =
+      widget.querySelector(".elementor-widget-container") ??
+      widget.querySelector(".elementor-widget-wrap") ??
+      widget;
     const target = container ?? widget;
 
     // Extract heading text
@@ -228,11 +309,13 @@ export function extractElementorText(doc: Document): string {
       if (text) texts.push(text);
     });
 
-    // Extract button text
-    target.querySelectorAll("button, .elementor-button, .elementor-button-text, a").forEach((btn) => {
-      const text = btn.textContent?.trim() ?? "";
-      if (text && text.length > 0) texts.push(text);
-    });
+    // Extract button and link text
+    target
+      .querySelectorAll("button, .elementor-button, .elementor-button-text, a")
+      .forEach((btn) => {
+        const text = btn.textContent?.trim() ?? "";
+        if (text) texts.push(text);
+      });
 
     // Extract alt text from images
     target.querySelectorAll("img[alt]").forEach((img) => {
@@ -249,9 +332,11 @@ export function extractElementorText(doc: Document): string {
     if (title) texts.push(title);
 
     // If no specific elements found, get the widget's direct text
-    if (texts.length === 0 || target.querySelectorAll("h1, h2, h3, h4, h5, h6, p, button, a, img").length === 0) {
+    if (
+      target.querySelectorAll("h1, h2, h3, h4, h5, h6, p, button, a, img").length === 0
+    ) {
       const directText = target.textContent?.trim() ?? "";
-      if (directText && directText.length > 0) texts.push(directText);
+      if (directText) texts.push(directText);
     }
   }
 
@@ -268,7 +353,14 @@ export function isElementorFrontendReady(win: Window): boolean {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const w = win as any;
-    return typeof w.elementorFrontend !== "undefined" && typeof w.elementorFrontend?.modules !== "undefined";
+    const frontend = w.elementorFrontend;
+    if (!frontend) return false;
+
+    const hasModules = typeof frontend.modules !== "undefined";
+    const hasConfig = typeof frontend.config !== "undefined";
+    const hasHooks = typeof frontend.hooks !== "undefined";
+
+    return hasModules || hasConfig || hasHooks;
   } catch {
     return false;
   }
@@ -303,7 +395,10 @@ export function getElementorSummary(doc: Document): {
   });
 
   return {
-    isElementor: sections.length > 0 || widgets.length > 0,
+    isElementor:
+      sections.length > 0 ||
+      widgets.length > 0 ||
+      doc.querySelector("[data-elementor-type]") !== null,
     sectionCount: sections.length,
     innerSectionCount: innerSections.length,
     widgetCount: widgets.length,
