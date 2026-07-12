@@ -1,24 +1,20 @@
 /**
- * Lazy-Load Detector — Phase 2
+ * Lazy-Load Detector — Production Version for ACE v1.2
  *
  * Detects lazy-loaded content patterns in HTML and DOM.
- * Used by the rendered DOM extractor to identify elements that need
- * scrolling to trigger loading, and by the evidence layer to report
- * lazy-load detection in diagnostics.
- *
  * Supports:
- * - Native loading="lazy" attribute
- * - Elementor data-elementor-type / data-elementor-id
- * - data-lazy, data-lazy-src, data-src, data-bg, data-background
- * - IntersectionObserver usage in inline scripts
- * - Common lazyload CSS classes (lazy, lazyload, lazyload-item, etc.)
- * - data-ll-status (LazyLoad library)
- * - data-was-processed (LazyLoad library)
- * - data-evaluated (various frameworks)
+ * - Native loading="lazy"
+ * - data-lazy*, data-src*, data-bg*, data-background
+ * - LazyLoad library attributes (data-ll-status, data-was-processed)
+ * - IntersectionObserver usage
  * - Infinite scroll containers
+ * - Elementor lazy widgets
+ * - Unloaded images, iframes, videos
  */
 
-/** Attributes that indicate lazy-loaded content. */
+//
+// ATTRIBUTE PATTERNS
+//
 const LAZY_LOAD_ATTRIBUTES = [
   "loading",
   "data-lazy",
@@ -32,98 +28,121 @@ const LAZY_LOAD_ATTRIBUTES = [
   "data-evaluated",
   "data-elementor-type",
   "data-elementor-id",
+  "data-ll-state",
+  "data-ll-loaded",
 ];
 
-/** CSS class patterns that indicate lazy-loaded content. */
+//
+// CLASS PATTERNS
+//
 const LAZY_LOAD_CLASS_PATTERNS = [
   "lazy",
   "lazyload",
-  "lazyload-item",
+  "lazy-load",
+  "lazyloading",
   "lazy-loading",
+  "lazyloaded",
   "lazy-loaded",
+  "lazyload-item",
   "lazyload-pending",
-  "elementor-section",
-  "elementor-widget",
-  "elementor-element",
-  "wp-block-lazy",
-  "IntersectionObserver",
+  "lazyload-wrapper",
+  "lozad",
+  "blazy",
+  "vanilla-lazyload",
+  "elementor-lazy",
+  "elementor-lazyload",
 ];
 
-/** Selectors for finding lazy-loadable elements in the DOM. */
+//
+// SELECTORS
+//
 const LAZY_LOAD_SELECTORS = [
   '[loading="lazy"]',
-  '[data-lazy]',
-  '[data-lazy-src]',
-  '[data-src]',
-  '[data-bg]',
-  '[data-background]',
-  '[data-lazyload]',
-  '[data-elementor-type]',
-  '[data-elementor-id]',
+  "[data-lazy]",
+  "[data-lazy-src]",
+  "[data-src]",
+  "[data-bg]",
+  "[data-background]",
+  "[data-lazyload]",
+  "[data-ll-status]",
+  "[data-was-processed]",
+  "[data-elementor-type]",
+  "[data-elementor-id]",
   ".lazy",
   ".lazyload",
-  ".lazyload-item",
   ".lazy-loading",
   ".lazyload-pending",
+  ".lazyload-item",
 ];
 
-/**
- * Detect if an HTML string contains lazy-load patterns.
- * Used to determine if rendered DOM extraction should be attempted.
- * @param html Raw HTML string.
- * @returns True if lazy-load patterns are detected.
- */
+//
+// INFINITE SCROLL PATTERNS
+//
+const INFINITE_SCROLL_PATTERNS = [
+  "infinite-scroll",
+  "infinite_scroll",
+  "loadmore",
+  "load-more",
+  "auto-load",
+  "scroll-pagination",
+  "scroll-loader",
+];
+
+//
+// HTML-LEVEL DETECTION
+//
 export function hasLazyLoadPatterns(html: string): boolean {
   if (!html) return false;
-  const lowerHtml = html.toLowerCase();
+  const lower = html.toLowerCase();
 
-  // Check for lazy-load attributes
+  // Attribute patterns
   for (const attr of LAZY_LOAD_ATTRIBUTES) {
-    if (lowerHtml.includes(attr.toLowerCase())) return true;
+    if (lower.includes(attr.toLowerCase())) return true;
   }
 
-  // Check for lazy-load class patterns
+  // Class patterns
   for (const pattern of LAZY_LOAD_CLASS_PATTERNS) {
-    if (lowerHtml.includes(pattern.toLowerCase())) return true;
+    if (lower.includes(pattern.toLowerCase())) return true;
   }
 
-  // Check for IntersectionObserver usage in scripts
-  if (lowerHtml.includes("intersectionobserver")) return true;
+  // IntersectionObserver usage
+  if (lower.includes("intersectionobserver") || lower.includes("new intersectionobserver")) {
+    return true;
+  }
 
-  // Check for infinite scroll patterns
-  if (
-    lowerHtml.includes("infinite-scroll") ||
-    lowerHtml.includes("infinite_scroll") ||
-    lowerHtml.includes("loadmore") ||
-    lowerHtml.includes("load-more") ||
-    lowerHtml.includes("pagination") && lowerHtml.includes("scroll")
-  ) {
+  // Infinite scroll patterns
+  for (const pattern of INFINITE_SCROLL_PATTERNS) {
+    if (lower.includes(pattern)) return true;
+  }
+
+  // Pagination + scroll combo
+  if (lower.includes("pagination") && lower.includes("scroll")) {
     return true;
   }
 
   return false;
 }
 
-/**
- * Find all lazy-loadable elements in a Document.
- * @param doc Parsed Document.
- * @returns Array of elements that have lazy-loading attributes or classes.
- */
+//
+// DOM-LEVEL DETECTION
+//
 export function detectLazyLoadElements(doc: Document): Element[] {
   const elements = new Set<Element>();
 
+  // Selector-based detection
   for (const selector of LAZY_LOAD_SELECTORS) {
     try {
       doc.querySelectorAll(selector).forEach((el) => elements.add(el));
     } catch {
-      // Invalid selector — skip
+      // Skip invalid selectors
     }
   }
 
-  // Check for elements with IntersectionObserver-related classes
+  // Class-based detection
   doc.querySelectorAll("*").forEach((el) => {
     const className = el.className;
     if (!className || typeof className !== "string") return;
+
     const lowerClass = className.toLowerCase();
     for (const pattern of LAZY_LOAD_CLASS_PATTERNS) {
       if (lowerClass.includes(pattern.toLowerCase())) {
@@ -136,40 +155,48 @@ export function detectLazyLoadElements(doc: Document): Element[] {
   return Array.from(elements);
 }
 
-/**
- * Count lazy-loadable elements that haven't been loaded yet.
- * An element is "unloaded" if it has a data-src/data-lazy-src but no src,
- * or if it has a lazyload class but not a lazy-loaded class.
- * @param doc Parsed Document.
- * @returns Count of unloaded lazy-load elements.
- */
+//
+// UNLOADED ELEMENT DETECTION
+//
 export function countUnloadedLazyElements(doc: Document): number {
   let count = 0;
 
   // Images with data-src but no src
   doc.querySelectorAll("img[data-src], img[data-lazy-src]").forEach((img) => {
-    if (!img.getAttribute("src") || img.getAttribute("src") === "") {
-      count++;
-    }
+    const src = img.getAttribute("src");
+    if (!src || src.trim() === "") count++;
   });
 
-  // Elements with lazyload class but not lazy-loaded
+  // Iframes lazy-loaded
+  doc.querySelectorAll("iframe[data-src], iframe[data-lazy-src]").forEach((iframe) => {
+    const src = iframe.getAttribute("src");
+    if (!src || src.trim() === "") count++;
+  });
+
+  // Videos lazy-loaded
+  doc.querySelectorAll("video[data-src], video[data-lazy-src]").forEach((video) => {
+    const src = video.getAttribute("src");
+    if (!src || src.trim() === "") count++;
+  });
+
+  // Lazyload classes not yet loaded
   doc.querySelectorAll(".lazy, .lazyload, .lazyload-pending").forEach((el) => {
-    if (!el.classList.contains("lazy-loaded") && !el.classList.contains("lazyloaded")) {
+    if (
+      !el.classList.contains("lazy-loaded") &&
+      !el.classList.contains("lazyloaded")
+    ) {
       count++;
     }
   });
 
-  // Elements with data-ll-status="pending" or "loading"
+  // LazyLoad library statuses
   doc.querySelectorAll('[data-ll-status="pending"], [data-ll-status="loading"]').forEach(() => {
     count++;
   });
 
-  // Elementor elements that haven't been rendered
+  // Elementor widgets not yet rendered
   doc.querySelectorAll("[data-elementor-type]").forEach((el) => {
-    const widgetType = el.getAttribute("data-elementor-type");
-    if (widgetType && !el.querySelector(".elementor-widget-container")) {
-      // Elementor widget without its container — not yet rendered
+    if (!el.querySelector(".elementor-widget-container")) {
       count++;
     }
   });
@@ -177,38 +204,43 @@ export function countUnloadedLazyElements(doc: Document): number {
   return count;
 }
 
-/**
- * Detect IntersectionObserver usage in inline scripts.
- * @param doc Parsed Document.
- * @returns True if IntersectionObserver is used in any inline script.
- */
+//
+// INTERSECTIONOBSERVER DETECTION
+//
 export function detectIntersectionObserverUsage(doc: Document): boolean {
   const scripts = doc.querySelectorAll("script");
   for (const script of scripts) {
     const text = script.textContent ?? "";
-    if (text.includes("IntersectionObserver") || text.includes("new IntersectionObserver")) {
+    if (
+      text.includes("IntersectionObserver") ||
+      text.includes("new IntersectionObserver")
+    ) {
       return true;
     }
   }
   return false;
 }
 
-/**
- * Get a summary of lazy-load detection for diagnostics.
- * @param doc Parsed Document.
- * @returns Object with lazy-load statistics.
- */
+//
+// SUMMARY
+//
 export function getLazyLoadSummary(doc: Document): {
   totalLazyElements: number;
   unloadedElements: number;
   hasIntersectionObserver: boolean;
   hasLazyLoadPatterns: boolean;
+  infiniteScrollDetected: boolean;
 } {
   const lazyElements = detectLazyLoadElements(doc);
+
+  const html = doc.documentElement.outerHTML.toLowerCase();
+  const infiniteScrollDetected = INFINITE_SCROLL_PATTERNS.some((p) => html.includes(p));
+
   return {
     totalLazyElements: lazyElements.length,
     unloadedElements: countUnloadedLazyElements(doc),
     hasIntersectionObserver: detectIntersectionObserverUsage(doc),
     hasLazyLoadPatterns: lazyElements.length > 0,
+    infiniteScrollDetected,
   };
 }
