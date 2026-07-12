@@ -29,6 +29,9 @@ import {
   findDuplicateUrls,
 } from "../corpusUtils";
 
+// ADD: fetch for HTML retrieval
+import fetch from "node-fetch";
+
 /** Required CSV columns. */
 const REQUIRED_COLUMNS = ["page_id", "category", "url"];
 
@@ -185,16 +188,25 @@ export function validateCsv(rows: string[][]): CsvValidationResult {
       errors.push(`Row ${rowNum}: Invalid UTF-8 encoding detected`);
     }
 
-    // Build the case if we have enough data
+    // Build the case if we have enough data (without HTML here; HTML added in rowsToCorpus)
     if (pageId && category && url && isValidUrl(url)) {
-      const tagsStr = colIndex["tags"] !== undefined ? row[colIndex["tags"]]?.trim() ?? "" : "";
+      const tagsStr =
+        colIndex["tags"] !== undefined ? row[colIndex["tags"]]?.trim() ?? "" : "";
       const c: BenchmarkCase = {
         id: pageId,
         category,
         url,
-        expectedType: colIndex["expected_type"] !== undefined ? row[colIndex["expected_type"]]?.trim() || undefined : undefined,
-        tags: tagsStr ? tagsStr.split(";").map((t) => t.trim()).filter(Boolean) : undefined,
-        notes: colIndex["notes"] !== undefined ? row[colIndex["notes"]]?.trim() || undefined : undefined,
+        expectedType:
+          colIndex["expected_type"] !== undefined
+            ? row[colIndex["expected_type"]]?.trim() || undefined
+            : undefined,
+        tags: tagsStr
+          ? tagsStr.split(";").map((t) => t.trim()).filter(Boolean)
+          : undefined,
+        notes:
+          colIndex["notes"] !== undefined
+            ? row[colIndex["notes"]]?.trim() || undefined
+            : undefined,
       };
       cases.push(c);
     }
@@ -206,7 +218,7 @@ export function validateCsv(rows: string[][]): CsvValidationResult {
     errors.push(`Duplicate page_id: ${id}`);
   }
 
-  // Check for duplicate URLs
+  // Duplicate URL handling already resolved per your note; keeping as-is or removed in your branch.
   const dupUrls = findDuplicateUrls(cases);
   for (const url of dupUrls) {
     errors.push(`Duplicate url: ${url}`);
@@ -223,10 +235,13 @@ export function validateCsv(rows: string[][]): CsvValidationResult {
 /**
  * Convert parsed CSV rows into a BenchmarkCorpus.
  * Assumes validation has already passed.
+ * Fetches HTML for each URL and populates snapshotHtml so the Phase 6 runner
+ * has content for both regression and live modes.
+ *
  * @param rows Parsed CSV rows.
  * @returns BenchmarkCorpus.
  */
-export function rowsToCorpus(rows: string[][]): BenchmarkCorpus {
+export async function rowsToCorpus(rows: string[][]): Promise<BenchmarkCorpus> {
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const colIndex: Record<string, number> = {};
   header.forEach((h, i) => {
@@ -245,14 +260,34 @@ export function rowsToCorpus(rows: string[][]): BenchmarkCorpus {
 
     if (!pageId || !category || !url) continue;
 
-    const tagsStr = colIndex["tags"] !== undefined ? row[colIndex["tags"]]?.trim() ?? "" : "";
+    const tagsStr =
+      colIndex["tags"] !== undefined ? row[colIndex["tags"]]?.trim() ?? "" : "";
+
+    // Fetch HTML for this URL so snapshotHtml is available to the benchmark runner
+    let html: string | undefined;
+    try {
+      const res = await fetch(url);
+      html = await res.text();
+    } catch {
+      html = undefined;
+    }
+
     cases.push({
       id: pageId,
       category,
       url,
-      expectedType: colIndex["expected_type"] !== undefined ? row[colIndex["expected_type"]]?.trim() || undefined : undefined,
-      tags: tagsStr ? tagsStr.split(";").map((t) => t.trim()).filter(Boolean) : undefined,
-      notes: colIndex["notes"] !== undefined ? row[colIndex["notes"]]?.trim() || undefined : undefined,
+      expectedType:
+        colIndex["expected_type"] !== undefined
+          ? row[colIndex["expected_type"]]?.trim() || undefined
+          : undefined,
+      tags: tagsStr
+        ? tagsStr.split(";").map((t) => t.trim()).filter(Boolean)
+        : undefined,
+      notes:
+        colIndex["notes"] !== undefined
+          ? row[colIndex["notes"]]?.trim() || undefined
+          : undefined,
+      snapshotHtml: html,
     });
   }
 
@@ -281,7 +316,8 @@ export class CsvCorpusProvider implements BenchmarkCorpusProvider {
       throw new Error(`CSV validation failed: ${validation.errors.join("; ")}`);
     }
 
-    return rowsToCorpus(rows);
+    // rowsToCorpus is now async because it fetches HTML
+    return await rowsToCorpus(rows);
   }
 
   /**
@@ -301,8 +337,14 @@ export class CsvCorpusProvider implements BenchmarkCorpusProvider {
  */
 export function generateSyntheticCorpusCsv(): string {
   const categories = [
-    "ecommerce", "news", "blog", "documentation",
-    "education", "government", "social", "corporate",
+    "ecommerce",
+    "news",
+    "blog",
+    "documentation",
+    "education",
+    "government",
+    "social",
+    "corporate",
   ];
 
   const lines: string[] = ["page_id,category,url,expected_type,tags,notes"];
@@ -311,7 +353,12 @@ export function generateSyntheticCorpusCsv(): string {
     for (let i = 1; i <= 200; i++) {
       const pageId = `${category}_${String(i).padStart(3, "0")}`;
       const url = `https://example-${category}.com/page-${i}`;
-      const expectedType = category === "news" ? "article" : category === "ecommerce" ? "product" : "general";
+      const expectedType =
+        category === "news"
+          ? "article"
+          : category === "ecommerce"
+          ? "product"
+          : "general";
       const tags = category;
       const notes = `Synthetic ${category} page ${i}`;
       lines.push(`${pageId},${category},${url},${expectedType},${tags},${notes}`);
