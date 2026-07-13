@@ -1,9 +1,7 @@
 /**
- * Benchmark Runner — Phase 6 (Puppeteer Fallback Edition)
- * Adds:
- *  - async HTML fetching in live mode
- *  - Puppeteer fallback when fetch() fails
- *  - regression mode unchanged
+ * Benchmark Runner — Phase 6 (Updated)
+ * Adds async HTML fetching in live mode.
+ * Regression mode unchanged.
  */
 
 import type {
@@ -13,14 +11,14 @@ import type {
   ACEScore,
   AceReport,
   AceSummaryReport,
+  AceEvidenceResult,
+  NormalizedEvidenceResult,
 } from "@/types";
 
 import { extractEvidenceFromHtmlString } from "@/modules/evidence";
 import { normalizeEvidence } from "@/modules/normalization";
 import { scoreNormalizedEvidence } from "@/modules/scoring";
 import { generateAceReport, generateSummaryReport } from "@/modules/reporting";
-
-import puppeteer from "puppeteer";
 
 /**
  * Pipeline function type — runs evidence extraction → normalization → scoring → reporting.
@@ -50,45 +48,7 @@ export function setBenchmarkPipeline(fn: BenchmarkPipelineFn | null): void {
 }
 
 /**
- * Global Puppeteer browser instance — reused for all cases.
- */
-let browser: puppeteer.Browser | null = null;
-
-/**
- * Fetch HTML with fallback:
- * 1. Try native fetch()
- * 2. If that fails, use Puppeteer
- */
-async function fetchHtmlWithFallback(url: string): Promise<string | null> {
-  // First attempt: native fetch
-  try {
-    const res = await fetch(url);
-    return await res.text();
-  } catch (err) {
-    // Continue to Puppeteer fallback
-  }
-
-  // Second attempt: Puppeteer
-  try {
-    if (!browser) {
-      browser = await puppeteer.launch({
-        headless: "new",
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      });
-    }
-
-    const page = await browser.newPage();
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
-    const html = await page.content();
-    await page.close();
-    return html;
-  } catch (err) {
-    return null;
-  }
-}
-
-/**
- * Run a single benchmark case through the full ACE pipeline.
+ * ⭐ UPDATED: runBenchmarkCase is now async
  */
 export async function runBenchmarkCase(
   c: BenchmarkCase,
@@ -97,32 +57,29 @@ export async function runBenchmarkCase(
   const startTime = performance.now();
 
   try {
-    let html: string | null = null;
-    let url: string = c.url ?? `snapshot://${c.id}`;
+    let html: string;
+    let url: string;
 
     if (mode === "regression" && c.snapshotHtml) {
       html = c.snapshotHtml;
-    } else if (mode === "live") {
-      html = await fetchHtmlWithFallback(url);
+      url = c.url ?? `snapshot://${c.id}`;
+    } else if (c.url) {
+      url = c.url;
 
-      if (!html) {
-        return {
-          caseId: c.id,
-          category: c.category,
-          mode,
-          score: null,
-          report: null,
-          summary: null,
-          status: "error",
-          errorMessage: `HTML fetch failed for ${url}`,
-          executionTimeMs: Math.round(performance.now() - startTime),
-        };
+      if (mode === "live") {
+        // ⭐ NEW: Always fetch HTML in live mode
+        const res = await fetch(url);
+        html = await res.text();
+      } else {
+        // fallback for regression mode
+        html = c.snapshotHtml ?? "";
       }
     } else {
-      html = c.snapshotHtml ?? "";
+      throw new Error(`No content available for case ${c.id}`);
     }
 
     const { score, report, summary } = activePipeline(html, url);
+    const executionTimeMs = Math.round(performance.now() - startTime);
 
     return {
       caseId: c.id,
@@ -132,9 +89,12 @@ export async function runBenchmarkCase(
       report,
       summary,
       status: "ok",
-      executionTimeMs: Math.round(performance.now() - startTime),
+      executionTimeMs,
     };
   } catch (err) {
+    const executionTimeMs = Math.round(performance.now() - startTime);
+    const errorMessage = err instanceof Error ? err.message : "Unknown benchmark error";
+
     return {
       caseId: c.id,
       category: c.category,
@@ -143,14 +103,14 @@ export async function runBenchmarkCase(
       report: null,
       summary: null,
       status: "error",
-      errorMessage: err instanceof Error ? err.message : "Unknown benchmark error",
-      executionTimeMs: Math.round(performance.now() - startTime),
+      errorMessage,
+      executionTimeMs,
     };
   }
 }
 
 /**
- * Run all cases in a corpus sequentially.
+ * ⭐ UPDATED: runBenchmarkCorpus is now async
  */
 export async function runBenchmarkCorpus(
   corpus: BenchmarkCorpus,
@@ -160,7 +120,7 @@ export async function runBenchmarkCorpus(
   const results: BenchmarkResult[] = [];
   const total = corpus.cases.length;
 
-  for (let i = 0; i < total; i++) {
+  for (let i = 0; i < corpus.cases.length; i++) {
     const c = corpus.cases[i];
     const result = await runBenchmarkCase(c, mode);
     results.push(result);
@@ -171,7 +131,7 @@ export async function runBenchmarkCorpus(
 }
 
 /**
- * Run corpus with concurrency.
+ * ⭐ UPDATED: async concurrency runner stays async
  */
 export async function runBenchmarkCorpusAsync(
   corpus: BenchmarkCorpus,
@@ -183,9 +143,11 @@ export async function runBenchmarkCorpusAsync(
   const results: BenchmarkResult[] = new Array(total);
   let completed = 0;
 
-  for (let i = 0; i < total; i += concurrency) {
+  for (let i = 0; i < corpus.cases.length; i += concurrency) {
     const batch = corpus.cases.slice(i, i + concurrency);
-    const batchResults = await Promise.all(batch.map((c) => runBenchmarkCase(c, mode)));
+
+    const batchPromises = batch.map((c) => runBenchmarkCase(c, mode));
+    const batchResults = await Promise.all(batchPromises);
 
     for (let j = 0; j < batchResults.length; j++) {
       results[i + j] = batchResults[j];
@@ -195,14 +157,4 @@ export async function runBenchmarkCorpusAsync(
   }
 
   return results;
-}
-
-/**
- * Cleanup Puppeteer browser after run.
- */
-export async function closeBenchmarkResources(): Promise<void> {
-  if (browser) {
-    await browser.close();
-    browser = null;
-  }
 }
