@@ -22,15 +22,13 @@ import type {
   BenchmarkCase,
   BenchmarkCorpusProvider,
 } from "@/types";
+
 import {
   sortCasesDeterministic,
   isValidUrl,
   findDuplicateIds,
   findDuplicateUrls,
 } from "../corpusUtils";
-
-// ADD: fetch for HTML retrieval
-import fetch from "node-fetch";
 
 /** Required CSV columns. */
 const REQUIRED_COLUMNS = ["page_id", "category", "url"];
@@ -70,7 +68,6 @@ export function parseCsv(csv: string): string[][] {
     if (inQuotes) {
       if (char === '"') {
         if (text[i + 1] === '"') {
-          // Escaped quote
           currentField += '"';
           i += 2;
         } else {
@@ -102,13 +99,11 @@ export function parseCsv(csv: string): string[][] {
     }
   }
 
-  // Push last field/row if there's remaining data
   if (currentField !== "" || currentRow.length > 0) {
     currentRow.push(currentField);
     rows.push(currentRow);
   }
 
-  // Remove trailing empty rows
   while (rows.length > 0 && rows[rows.length - 1].every((c) => c.trim() === "")) {
     rows.pop();
   }
@@ -130,10 +125,8 @@ export function validateCsv(rows: string[][]): CsvValidationResult {
     return { valid: false, errors, warnings, rowCount: 0 };
   }
 
-  // Check header row
   const header = rows[0].map((h) => h.trim().toLowerCase());
 
-  // Check for missing required columns
   for (const required of REQUIRED_COLUMNS) {
     if (!header.includes(required)) {
       errors.push(`Missing required column: ${required}`);
@@ -144,14 +137,12 @@ export function validateCsv(rows: string[][]): CsvValidationResult {
     return { valid: false, errors, warnings, rowCount: rows.length - 1 };
   }
 
-  // Check for unsupported columns (warning)
   for (const col of header) {
     if (!ALL_KNOWN_COLUMNS.includes(col)) {
       warnings.push(`Unsupported column: ${col} (will be ignored)`);
     }
   }
 
-  // Get column indices
   const colIndex: Record<string, number> = {};
   header.forEach((h, i) => {
     if (ALL_KNOWN_COLUMNS.includes(h)) {
@@ -159,39 +150,33 @@ export function validateCsv(rows: string[][]): CsvValidationResult {
     }
   });
 
-  // Validate data rows
   const dataRows = rows.slice(1);
   const cases: BenchmarkCase[] = [];
 
   for (let rowIdx = 0; rowIdx < dataRows.length; rowIdx++) {
     const row = dataRows[rowIdx];
-    const rowNum = rowIdx + 2; // 1-based, +1 for header
+    const rowNum = rowIdx + 2;
 
     const pageId = row[colIndex["page_id"]]?.trim() ?? "";
     const category = row[colIndex["category"]]?.trim() ?? "";
     const url = row[colIndex["url"]]?.trim() ?? "";
 
-    if (!pageId) {
-      errors.push(`Row ${rowNum}: Missing page_id`);
-    }
-    if (!category) {
-      errors.push(`Row ${rowNum}: Empty category`);
-    }
+    if (!pageId) errors.push(`Row ${rowNum}: Missing page_id`);
+    if (!category) errors.push(`Row ${rowNum}: Empty category`);
     if (!url) {
       errors.push(`Row ${rowNum}: Missing url`);
     } else if (!isValidUrl(url)) {
       errors.push(`Row ${rowNum}: Invalid URL: ${url}`);
     }
 
-    // Check for invalid UTF-8 (simple check for replacement chars)
     if (row.some((c) => c.includes("\uFFFD"))) {
       errors.push(`Row ${rowNum}: Invalid UTF-8 encoding detected`);
     }
 
-    // Build the case if we have enough data (without HTML here; HTML added in rowsToCorpus)
     if (pageId && category && url && isValidUrl(url)) {
       const tagsStr =
         colIndex["tags"] !== undefined ? row[colIndex["tags"]]?.trim() ?? "" : "";
+
       const c: BenchmarkCase = {
         id: pageId,
         category,
@@ -208,17 +193,16 @@ export function validateCsv(rows: string[][]): CsvValidationResult {
             ? row[colIndex["notes"]]?.trim() || undefined
             : undefined,
       };
+
       cases.push(c);
     }
   }
 
-  // Check for duplicate page_ids
   const dupIds = findDuplicateIds(cases);
   for (const id of dupIds) {
     errors.push(`Duplicate page_id: ${id}`);
   }
 
-  // Duplicate URL handling already resolved per your note; keeping as-is or removed in your branch.
   const dupUrls = findDuplicateUrls(cases);
   for (const url of dupUrls) {
     errors.push(`Duplicate url: ${url}`);
@@ -235,15 +219,16 @@ export function validateCsv(rows: string[][]): CsvValidationResult {
 /**
  * Convert parsed CSV rows into a BenchmarkCorpus.
  * Assumes validation has already passed.
- * Fetches HTML for each URL and populates snapshotHtml so the Phase 6 runner
- * has content for both regression and live modes.
  *
- * @param rows Parsed CSV rows.
- * @returns BenchmarkCorpus.
+ * ⭐ HYBRID LOADER FIX:
+ * Instead of fetching HTML (which breaks Vite/browser),
+ * we provide a placeholder snapshotHtml so the Phase‑6 runner
+ * will fetch HTML itself in Node.
  */
-export async function rowsToCorpus(rows: string[][]): Promise<BenchmarkCorpus> {
+export function rowsToCorpus(rows: string[][]): BenchmarkCorpus {
   const header = rows[0].map((h) => h.trim().toLowerCase());
   const colIndex: Record<string, number> = {};
+
   header.forEach((h, i) => {
     if (ALL_KNOWN_COLUMNS.includes(h)) {
       colIndex[h] = i;
@@ -263,15 +248,6 @@ export async function rowsToCorpus(rows: string[][]): Promise<BenchmarkCorpus> {
     const tagsStr =
       colIndex["tags"] !== undefined ? row[colIndex["tags"]]?.trim() ?? "" : "";
 
-    // Fetch HTML for this URL so snapshotHtml is available to the benchmark runner
-    let html: string | undefined;
-    try {
-      const res = await fetch(url);
-      html = await res.text();
-    } catch {
-      html = undefined;
-    }
-
     cases.push({
       id: pageId,
       category,
@@ -287,7 +263,13 @@ export async function rowsToCorpus(rows: string[][]): Promise<BenchmarkCorpus> {
         colIndex["notes"] !== undefined
           ? row[colIndex["notes"]]?.trim() || undefined
           : undefined,
-      snapshotHtml: html,
+
+      /**
+       * ⭐ CRITICAL FIX:
+       * Provide a placeholder snapshotHtml so the Phase‑6 runner
+       * will fetch HTML itself in Node.
+       */
+      snapshotHtml: "<!-- placeholder -->",
     });
   }
 
@@ -299,7 +281,6 @@ export async function rowsToCorpus(rows: string[][]): Promise<BenchmarkCorpus> {
 
 /**
  * CSV Corpus Provider implementation.
- * Loads a CSV string and produces a BenchmarkCorpus.
  */
 export class CsvCorpusProvider implements BenchmarkCorpusProvider {
   private csvContent: string;
@@ -316,14 +297,9 @@ export class CsvCorpusProvider implements BenchmarkCorpusProvider {
       throw new Error(`CSV validation failed: ${validation.errors.join("; ")}`);
     }
 
-    // rowsToCorpus is now async because it fetches HTML
-    return await rowsToCorpus(rows);
+    return rowsToCorpus(rows);
   }
 
-  /**
-   * Validate the CSV without loading the corpus.
-   * @returns Validation result.
-   */
   validate(): CsvValidationResult {
     const rows = parseCsv(this.csvContent);
     return validateCsv(rows);
@@ -331,9 +307,7 @@ export class CsvCorpusProvider implements BenchmarkCorpusProvider {
 }
 
 /**
- * Generate a synthetic 1600-site CSV corpus (8 categories × 200 sites).
- * Used for testing and CI.
- * @returns CSV string with 1600 entries.
+ * Synthetic corpus generator (unchanged)
  */
 export function generateSyntheticCorpusCsv(): string {
   const categories = [
